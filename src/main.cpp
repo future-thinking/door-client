@@ -1,55 +1,107 @@
 #include <Arduino.h>
-#include <SPI.h>         // RC522 Module uses SPI protocol
-#include <MFRC522.h>     // Library for Mifare RC522 Devices
-#include <WiFi.h>        // Libary for Wifi
-#include <ArduinoJson.h> // Libary for parsiong Json objects
-#include <EEPROM.h>      // Library for reading and writing to eeprom
-#include <ArduinoHttpClient.h>  
+#include <WiFi.h>
+#include <ArduinoHttpClient.h>
+#include <AsyncTCP.h>
+#include <AsyncElegantOTA.h>
+#include <ArduinoJson.h>
+#include "ESPAsyncWebServer.h"
+#include <EEPROM.h>
+#include <MFRC522.h>
 
-
-#include "secrets.h"
-
-// ----------- STEPPER SETTINGS -------------
-#define SPT 200       //Steps per turn
 #define openTime 5000 // Time before locking the door again
+#define wipeB 3
 
-#define DIR 25    //Stepper Pins
-#define STEP 26   //Stepper Pins
-#define ENABLE 13 //Stepper Pins
+byte *successRead;
 
-//------------ LED SETTINGS -----------------
+#define SS_PIN 21
+#define RST_PIN 22
+
+byte readCard[4]; // Stores scanned ID read from RFID Module
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
 #define LED_ON HIGH
 #define LED_OFF LOW
 
-#define redLed 16 // Set Led Pins
+//pins
+#define redLed 16
 #define greenLed 5
 #define blueLed 17
 #define groundLed 4
 
-#define wipeB 3
+#define SPT 200   //Steps per turn
+#define DIR 25    //Stepper Pins
+#define STEP 26   //Stepper Pins
+#define ENABLE 13 //Stepper Pins
 
-#define EEPROM_SIZE 256
+void setGranted()
+{
+  digitalWrite(blueLed, LED_OFF); // Turn off blue LED
+  digitalWrite(redLed, LED_OFF);  // Turn off red LED
+  digitalWrite(greenLed, LED_ON); // Turn on green LED
+}
 
-int successRead; // Variable integer to keep if we have Successful Read from Reader
+void setDenied()
+{
+  digitalWrite(greenLed, LED_OFF); // Make sure green LED is off
+  digitalWrite(blueLed, LED_OFF);  // Make sure blue LED is off
+  digitalWrite(redLed, LED_ON);    // Turn on red LED
+}
 
-byte storedCard[4]; // Stores an ID read from EEPROM
-byte readCard[4];   // Stores scanned ID read from RFID Module
+void setIdle()
+{
+  digitalWrite(blueLed, LED_ON);   // Blue LED ON and ready to read card
+  digitalWrite(redLed, LED_OFF);   // Make sure Red LED is off
+  digitalWrite(greenLed, LED_OFF); // Make sure Green LED is off
+}
 
-String cardId;
+void setRed(boolean state)
+{
+  digitalWrite(redLed, state); // Make sure Red LED is off
+}
 
-#define SS_PIN 21
-#define RST_PIN 22
-MFRC522 mfrc522(SS_PIN, RST_PIN); // Create MFRC522 instance.
+void blinkRed(int count)
+{
+  for (int i = 0; i < count; i++)
+  {
+    digitalWrite(redLed, LED_OFF); // visualize successful wipe
+    delay(200);
+    digitalWrite(redLed, LED_ON);
+    delay(200);
+  }
+}
 
-#define address "http://192.168.1.116/door?card="
-#define ip "192.168.1.116"
-#define port 80
+void blinkBuildin(int count)
+{
+  for (int i = 0; i < count; i++)
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(200);
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(200);
+  }
+}
 
-WiFiClient wifi;
-HttpClient client = HttpClient(wifi, ip, port);
-int status = WL_IDLE_STATUS;
+byte *getID()
+{
+  if (!mfrc522.PICC_IsNewCardPresent())
+    return 0;
+  if (!mfrc522.PICC_ReadCardSerial())
+    return 0;
+  // There are Mifare PICCs which have 4 byte or 7 byte UID care if you use 7 byte PICC
+  // I think we should assume every PICC as they have 4 byte UID
+  // Until we support 7 byte PICCs
+  Serial.println(F("Scanned PICC's UID:"));
+  for (int i = 0; i < 4; i++)
+  {
+    readCard[i] = mfrc522.uid.uidByte[i];
+    Serial.print(readCard[i], HEX);
+  }
+  Serial.println("");
+  mfrc522.PICC_HaltA(); // Stop reading
+  return readCard;
+}
 
-/////////////////////////////////////////  Rotate Stepper    ///////////////////////////////////
 void stepperTurn(String direction)
 {
   digitalWrite(ENABLE, LOW);
@@ -67,39 +119,41 @@ void stepperTurn(String direction)
   digitalWrite(ENABLE, HIGH);
 }
 
-/////////////////////////////////////////  Access Granted    ///////////////////////////////////
-void granted(int setDelay)
+void setupLeds()
+{
+  pinMode(redLed, OUTPUT);
+  pinMode(greenLed, OUTPUT);
+  pinMode(blueLed, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(groundLed, OUTPUT);
+
+  digitalWrite(redLed, LED_OFF);   // Make sure led is off
+  digitalWrite(greenLed, LED_OFF); // Make sure led is off
+  digitalWrite(blueLed, LED_OFF);  // Make sure led is off
+  digitalWrite(groundLed, LOW);
+}
+
+void open(int setDelay)
 {
   Serial.println("Access Granted");
-  digitalWrite(blueLed, LED_OFF); // Turn off blue LED
-  digitalWrite(redLed, LED_OFF);  // Turn off red LED
-  digitalWrite(greenLed, LED_ON); // Turn on green LED
+  setGranted();
   stepperTurn("right");
   delay(setDelay);
   stepperTurn("left");
+  setIdle();
 }
 
-///////////////////////////////////////// Access Denied  ///////////////////////////////////
 void denied()
 {
   Serial.println("Access denied");
-  digitalWrite(greenLed, LED_OFF); // Make sure green LED is off
-  digitalWrite(blueLed, LED_OFF);  // Make sure blue LED is off
-  digitalWrite(redLed, LED_ON);    // Turn on red LED
+  setDenied();
   delay(1000);
+  setIdle();
 }
 
-//////////////////////////////////////// Read an ID from EEPROM //////////////////////////////
-void readID(int number)
-{
-  int start = (number * 4) + 2; // Figure out starting position
-  for (int i = 0; i < 4; i++)
-  {                                         // Loop 4 times to get the 4 Bytes
-    storedCard[i] = EEPROM.read(start + i); // Assign values read from EEPROM to array
-  }
-}
+#define EEPROM_SIZE 256
+byte storedCard[4]; // Stores an ID read from EEPROM
 
-///////////////////////////////////////// Check Bytes   ///////////////////////////////////
 boolean checkTwo(byte a[], byte b[])
 {
   bool match = false;
@@ -120,7 +174,33 @@ boolean checkTwo(byte a[], byte b[])
   }
 }
 
-///////////////////////////////////////// Find ID From EEPROM   ///////////////////////////////////
+void whipe()
+{ // If button still be pressed, wipe EEPROM
+  Serial.println(F("Starting Wiping EEPROM"));
+  for (int x = 0; x < EEPROM.length(); x = x + 1)
+  { //Loop end of EEPROM address
+    if (EEPROM.read(x) == 0)
+    { //If EEPROM address 0
+      // do nothing, already clear, go to the next address in order to save time and reduce writes to EEPROM
+    }
+    else
+    {
+      EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS
+    }
+  }
+  Serial.println(F("EEPROM Successfully Wiped"));
+  //blink led red
+}
+
+void readID(int number)
+{
+  int start = (number * 4) + 2; // Figure out starting position
+  for (int i = 0; i < 4; i++)
+  {                                         // Loop 4 times to get the 4 Bytes
+    storedCard[i] = EEPROM.read(start + i); // Assign values read from EEPROM to array
+  }
+}
+
 boolean findID(byte find[])
 {
   int count = EEPROM.read(0); // Read the first Byte of EEPROM that
@@ -139,33 +219,6 @@ boolean findID(byte find[])
   return false;
 }
 
-///////////////////////////////////////// Get PICC's UID ///////////////////////////////////
-int getID()
-{
-  // Getting ready for Reading PICCs
-  if (!mfrc522.PICC_IsNewCardPresent())
-  { //If a new PICC placed to RFID reader continue
-    return 0;
-  }
-  if (!mfrc522.PICC_ReadCardSerial())
-  { //Since a PICC placed get Serial and continue
-    return 0;
-  }
-  // There are Mifare PICCs which have 4 byte or 7 byte UID care if you use 7 byte PICC
-  // I think we should assume every PICC as they have 4 byte UID
-  // Until we support 7 byte PICCs
-  Serial.println(F("Scanned PICC's UID:"));
-  for (int i = 0; i < 4; i++)
-  { //
-    readCard[i] = mfrc522.uid.uidByte[i];
-    Serial.print(readCard[i], HEX);
-  }
-  Serial.println("");
-  mfrc522.PICC_HaltA(); // Stop reading
-  return 1;
-}
-
-///////////////////////////////////////// Add ID to EEPROM   ///////////////////////////////////
 void writeID(byte a[])
 {
   if (!findID(a))
@@ -186,15 +239,6 @@ void writeID(byte a[])
   }
 }
 
-//////////////////////////////////////// Normal Mode Led  ///////////////////////////////////
-void normalModeOn()
-{
-  digitalWrite(blueLed, LED_ON);   // Blue LED ON and ready to read card
-  digitalWrite(redLed, LED_OFF);   // Make sure Red LED is off
-  digitalWrite(greenLed, LED_OFF); // Make sure Green LED is off
-}
-
-///////////////////////////////////////// Find Slot   ///////////////////////////////////
 int findIDSLOT(byte find[])
 {
   int count = EEPROM.read(0); // Read the first Byte of EEPROM that
@@ -208,10 +252,9 @@ int findIDSLOT(byte find[])
       break;    // Stop looking we found it
     }
   }
-  return NULL;
+  return -1;
 }
 
-///////////////////////////////////////// Remove ID from EEPROM   ///////////////////////////////////
 void deleteID(byte a[])
 {
   if (!findID(a))
@@ -225,7 +268,7 @@ void deleteID(byte a[])
     int start;                // = ( num * 4 ) + 6; // Figure out where the next slot starts
     int looping;              // The number of times the loop repeats
     int j;
-    slot = findIDSLOT(a);       // Figure out the slot number of the card to delete
+    slot = findIDSLOT(a); // Figure out the slot number of the card to delete
     start = (slot * 4) + 2;
     looping = ((num - slot) * 4);
     num--;                // Decrement the counter by one
@@ -242,11 +285,24 @@ void deleteID(byte a[])
   }
 }
 
+#define address "http://192.168.1.132/door?card="
+#define ip "192.168.1.116"
+#define port 80
+
+#define SECRET_SSID "GO-FT"    // replace MySSID with your WiFi network name
+#define SECRET_PASS "GOtech!!" // replace MyPassword with your WiFi password
+
+AsyncWebServer server{80};
+
+WiFiClient wifi;
+HttpClient client{wifi, ip, port};
+int status = WL_IDLE_STATUS;
+
 bool checkID(byte id[4])
 {
   StaticJsonDocument<200> doc;
-  cardId = "0";
-  for (int i; i <= 3; i++)
+  String cardId = "0";
+  for (int i = 0; i <= 3; i++)
   {
     cardId += id[i];
   }
@@ -256,7 +312,7 @@ bool checkID(byte id[4])
   { //Check the current connection status
     Serial.println("making GET request");
     client.beginRequest();
-    client.get("door?card=" + cardId);
+    client.get("/door?card=" + cardId);
     //client.sendHeader("X-CUSTOM-HEADER", "custom_value");
     client.endRequest();
 
@@ -269,8 +325,7 @@ bool checkID(byte id[4])
     Serial.print("GET Response: ");
     Serial.println(response);
 
-    Serial.println("Wait five seconds");
-    if (statusCode > 0)
+    if (statusCode == 200)
     { //Check for the returning code
       Serial.println(response);
       DeserializationError error = deserializeJson(doc, response);
@@ -280,9 +335,12 @@ bool checkID(byte id[4])
         Serial.println(error.c_str());
         return false;
       }
-      if (!findID(id))
+      if (!findID(id) && doc["open"])
       {
         writeID(id);
+      }
+      else if (!doc["open"]) {
+        deleteID(id);
       }
       return doc["open"];
     }
@@ -293,82 +351,32 @@ bool checkID(byte id[4])
   }
   if (findID(id))
   {
+    Serial.println("Found id in EEPROM");
     return true;
   }
   else
+    Serial.println("Could not find id in EEPROM");
     return false;
 }
 
-///////////////////////////////////////// Setup ///////////////////////////////////
 void setup()
 {
-  //Arduino Pin Configuration
-  pinMode(redLed, OUTPUT);
-  pinMode(greenLed, OUTPUT);
-  pinMode(blueLed, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(groundLed, OUTPUT);
+  Serial.begin(115200);
+  SPI.begin();        // MFRC522 Hardware uses SPI protocol
+  mfrc522.PCD_Init(); // Initialize MFRC522 Hardware
+  //If you set Antenna Gain to Max it will increase reading distance
+  mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
+  //whipe EEPROM if button pressed
   pinMode(DIR, OUTPUT); //Stepper outputs
   pinMode(STEP, OUTPUT);
   pinMode(ENABLE, OUTPUT);
-  digitalWrite(redLed, LED_OFF);   // Make sure led is off
-  digitalWrite(greenLed, LED_OFF); // Make sure led is off
-  digitalWrite(blueLed, LED_OFF);  // Make sure led is off
-  digitalWrite(groundLed, LOW);
 
   digitalWrite(ENABLE, HIGH); //Turn stepper motor off
 
-  //Protocol Configuration
-  Serial.begin(115200); // Initialize serial communications with PC
-  SPI.begin();          // MFRC522 Hardware uses SPI protocol
-  mfrc522.PCD_Init();   // Initialize MFRC522 Hardware
+  setupLeds();
 
   EEPROM.begin(EEPROM_SIZE);
 
-  //If you set Antenna Gain to Max it will increase reading distance
-  mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
-
-  //whipe EEPROM if button pressed
-  if (digitalRead(wipeB) == LOW)
-  {                               // when button pressed pin should get low, button connected to ground
-    digitalWrite(redLed, LED_ON); // Red Led stays on to inform user we are going to wipe
-    Serial.println(F("Wipe Button Pressed"));
-    Serial.println(F("You have 15 seconds to Cancel"));
-    Serial.println(F("This will be remove all records and cannot be undone"));
-    delay(5000); // Give user enough time to cancel operation
-    if (digitalRead(wipeB) == LOW)
-    { // If button still be pressed, wipe EEPROM
-      Serial.println(F("Starting Wiping EEPROM"));
-      for (int x = 0; x < EEPROM.length(); x = x + 1)
-      { //Loop end of EEPROM address
-        if (EEPROM.read(x) == 0)
-        { //If EEPROM address 0
-          // do nothing, already clear, go to the next address in order to save time and reduce writes to EEPROM
-        }
-        else
-        {
-          EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS
-        }
-      }
-      Serial.println(F("EEPROM Successfully Wiped"));
-      digitalWrite(redLed, LED_OFF); // visualize successful wipe
-      delay(200);
-      digitalWrite(redLed, LED_ON);
-      delay(200);
-      digitalWrite(redLed, LED_OFF);
-      delay(200);
-      digitalWrite(redLed, LED_ON);
-      delay(200);
-      digitalWrite(redLed, LED_OFF);
-    }
-    else
-    {
-      Serial.println(F("Wiping Cancelled"));
-      digitalWrite(redLed, LED_OFF);
-    }
-  }
-
-  //wifi setup
   delay(4000);
   WiFi.begin(SECRET_SSID, SECRET_PASS);
   while (WiFi.status() != WL_CONNECTED)
@@ -377,42 +385,38 @@ void setup()
     Serial.println("Connecting to WiFi..");
   }
   Serial.println("Connected to the WiFi network");
+  AsyncElegantOTA.begin(&server, SECRET_SSID, SECRET_PASS);
+  server.begin();
 
-  Serial.println(F("Access Control v3.4")); // For debugging purposes
-  Serial.println("");
-  Serial.println(F("-------------------"));
-  Serial.println(F("Everything Ready"));
-  Serial.println(F("Waiting PICCs to be scanned"));
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(200);
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(200);
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(200);
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(200);
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(200);
-  digitalWrite(LED_BUILTIN, LOW);
-  normalModeOn();
+  if (digitalRead(wipeB) == LOW)
+  { // when button pressed pin should get low, button connected to ground
+    setRed(1);
+    Serial.println(F("Wipe Button Pressed"));
+    Serial.println(F("You have 15 seconds to Cancel"));
+    Serial.println(F("This will be remove all records and cannot be undone"));
+    delay(5000); // Give user enough time to cancel operation
+    if (digitalRead(wipeB) == LOW)
+      whipe();
+    else
+    {
+      Serial.println(F("Wiping Cancelled"));
+      setRed(0);
+    }
+  }
+  setIdle();
 }
 
-///////////////////////////////////////// Main Loop ///////////////////////////////////
 void loop()
 {
   do
   {
-    successRead = getID(); // sets successRead to 1 when we get read from reader otherwise 0
-  } while (!successRead);  //the program will not go further while you not get a successful read
-  if (checkID(readCard))
-  {
-    Serial.println(F("Welcome, You shall pass"));
-    granted(openTime);
-  }
+    Serial.println("loop");
+    AsyncElegantOTA.loop();
+    successRead = getID();
+
+  } while (successRead == 0);
+  if (checkID(successRead))
+    open(openTime);
   else
-  { // If not, show that the ID was not valid
-    Serial.println(F("You shall not pass"));
     denied();
-  }
-  normalModeOn();
 }
