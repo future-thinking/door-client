@@ -7,16 +7,22 @@
 #include "ESPAsyncWebServer.h"
 #include <EEPROM.h>
 #include <MFRC522.h>
+#include <PubSubClient.h>
 
 #define openTime 5000 // Time before locking the door again
 #define wipeB 3
 
-byte *successRead;
+
 
 #define SS_PIN 21
 #define RST_PIN 22
 
+byte *successRead;
 byte readCard[4]; // Stores scanned ID read from RFID Module
+boolean accessGranted = false;
+const long timeout = 3000;            // timeout for mqtt request
+boolean response = false;             // if we got a response from mqtt
+
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 
@@ -82,7 +88,7 @@ void blinkBuildin(int count)
   }
 }
 
-byte *getID()
+byte * getID()
 {
   if (!mfrc522.PICC_IsNewCardPresent())
     return 0;
@@ -95,9 +101,9 @@ byte *getID()
   for (int i = 0; i < 4; i++)
   {
     readCard[i] = mfrc522.uid.uidByte[i];
-    Serial.print(readCard[i], HEX);
+    //Serial.print(readCard[i], HEX);
   }
-  Serial.println("");
+  //Serial.println("");
   mfrc522.PICC_HaltA(); // Stop reading
   return readCard;
 }
@@ -135,6 +141,7 @@ void setupLeds()
 
 void open(int setDelay)
 {
+  accessGranted = true;
   Serial.println("Access Granted");
   setGranted();
   stepperTurn("right");
@@ -237,6 +244,7 @@ void writeID(byte a[])
   {
     Serial.println(F("Failed! There is something wrong with ID or bad EEPROM"));
   }
+  EEPROM.commit();
 }
 
 int findIDSLOT(byte find[])
@@ -285,22 +293,28 @@ void deleteID(byte a[])
   }
 }
 
-#define address "http://192.168.1.132/door?card="
+//#define address "http://192.168.1.132/door?card="
 #define ip "192.168.1.116"
 #define port 80
+
+
 
 #define SECRET_SSID "GO-FT"    // replace MySSID with your WiFi network name
 #define SECRET_PASS "GOtech!!" // replace MyPassword with your WiFi password
 
+const char* mqtt_server = "192.168.178.77"; //Ip of GO-FT broker is 192.168.3.186 
+
+
 AsyncWebServer server{80};
 
 WiFiClient wifi;
-HttpClient client{wifi, ip, port};
+PubSubClient client(wifi);
+
+//HttpClient client{wifi, ip, port};
 int status = WL_IDLE_STATUS;
 
 bool checkID(byte id[4])
 {
-  StaticJsonDocument<200> doc;
   String cardId = "0";
   for (int i = 0; i <= 3; i++)
   {
@@ -308,55 +322,84 @@ bool checkID(byte id[4])
   }
   Serial.print("Card ID: ");
   Serial.println(cardId);
-  if ((WiFi.status() == WL_CONNECTED))
+
+  if ((WiFi.status() == WL_CONNECTED) && client.connected())
   { //Check the current connection status
-    Serial.println("making GET request");
-    client.beginRequest();
-    client.get("/door?card=" + cardId);
-    //client.sendHeader("X-CUSTOM-HEADER", "custom_value");
-    client.endRequest();
+    response = false;
 
-    // read the status code and body of the response
-    int statusCode = client.responseStatusCode();
-    String response = client.responseBody();
+    char tempvar [cardId.length()];
+    accessGranted = false;
+    
+    cardId.toCharArray(tempvar,cardId.length());
 
-    Serial.print("GET Status code: ");
-    Serial.println(statusCode);
-    Serial.print("GET Response: ");
-    Serial.println(response);
+    client.publish("door/checkCard", tempvar);
 
-    if (statusCode == 200)
-    { //Check for the returning code
-      Serial.println(response);
-      DeserializationError error = deserializeJson(doc, response);
-      if (error)
+    // Wait 3 seconds for a response
+    unsigned long previousMillis = millis(); 
+    
+    do
+    {
+      client.loop();
+    
+
+      if (millis() - previousMillis > timeout){break;}
+    } while (!response);
+    Serial.println("Ended while response: " + response);
+    if (response)
+    {
+      if (accessGranted)
       {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.c_str());
+        
+        accessGranted = false;
+        response = false;
+
+        return true;
+      }else {
         return false;
       }
-      if (!findID(id) && doc["open"])
-      {
-        writeID(id);
-      }
-      else if (!doc["open"]) {
-        deleteID(id);
-      }
-      return doc["open"];
-    }
-    else
-    {
-      Serial.println("Error on HTTP request");
     }
   }
+
+  Serial.println("No response from mqtt looking in EEPROM");
   if (findID(id))
   {
     Serial.println("Found id in EEPROM");
+    open(openTime);
     return true;
   }
   else
     Serial.println("Could not find id in EEPROM");
     return false;
+}
+
+void callback(char* topic, byte* message, unsigned int length) {
+  response = true;
+  Serial.println();
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+  
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  if (strcmp (topic, "door/open") == 0){
+    if (messageTemp == "True")
+    {
+      open(openTime);
+      accessGranted = true;
+      
+    }else if (messageTemp == "False"){
+      deleteID(readCard);
+    }
+    
+  }else if (messageTemp == "")
+  {
+    
+  }
 }
 
 void setup()
@@ -371,6 +414,9 @@ void setup()
   pinMode(STEP, OUTPUT);
   pinMode(ENABLE, OUTPUT);
 
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+
   digitalWrite(ENABLE, HIGH); //Turn stepper motor off
 
   setupLeds();
@@ -384,9 +430,19 @@ void setup()
     delay(1000);
     Serial.println("Connecting to WiFi..");
   }
+  
   Serial.println("Connected to the WiFi network");
   AsyncElegantOTA.begin(&server, SECRET_SSID, SECRET_PASS);
   server.begin();
+
+  while (!client.connected())
+  {
+    client.connect("doorESP23"); 
+    Serial.println("trying to connect to mqtt");
+  }
+  Serial.println("mqtt is connected");
+
+  client.subscribe("door/open");
 
   if (digitalRead(wipeB) == LOW)
   { // when button pressed pin should get low, button connected to ground
@@ -404,19 +460,44 @@ void setup()
     }
   }
   setIdle();
+
+  pinMode(14, INPUT_PULLUP);
 }
 
 void loop()
 {
+  successRead = 0;
   do
   {
-    Serial.println("loop");
+    client.loop();
+    //Serial.println("loop");
     AsyncElegantOTA.loop();
     successRead = getID();
 
+    if(digitalRead(14) == LOW){
+
+      Serial.println("add new Card:");
+      delay(500);
+      while (digitalRead(14) == HIGH)
+      {
+        successRead = getID();
+        if (successRead)
+        {
+          writeID(successRead);
+        }
+        
+      }
+      delay(1000);
+      
+    }
+
   } while (successRead == 0);
-  if (checkID(successRead))
-    open(openTime);
-  else
+  if (!checkID(successRead))
+  {
+
     denied();
+  }else{
+    Serial.println("return");
+  }
+  
 }
