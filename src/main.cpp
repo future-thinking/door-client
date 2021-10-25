@@ -473,7 +473,7 @@ void loop()
     //Serial.println("loop");
     AsyncElegantOTA.loop();
     successRead = getID();
-
+    /* uncomment to add a new card by pressing a button
     if(digitalRead(14) == LOW){
 
       Serial.println("add new Card:");
@@ -488,6 +488,7 @@ void loop()
         
       }
       delay(1000);
+      */
       
     }
 
