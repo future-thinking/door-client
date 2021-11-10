@@ -488,9 +488,10 @@ void loop()
         
       }
       delay(1000);
+      }
       */
       
-    }
+  
 
   } while (successRead == 0);
   if (!checkID(successRead))
