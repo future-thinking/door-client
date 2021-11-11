@@ -29,24 +29,30 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);
 #define blueLed 17
 #define groundLed 4
 
-#define SPT 200   //Steps per turn
-#define DIR 25    //Stepper Pins
-#define STEP 26   //Stepper Pins
-#define ENABLE 13 //Stepper Pins
+int period = 100000;
+unsigned long time_now = 0;
 
-void setGranted()
-{
-  digitalWrite(blueLed, LED_OFF); // Turn off blue LED
-  digitalWrite(redLed, LED_OFF);  // Turn off red LED
-  digitalWrite(greenLed, LED_ON); // Turn on green LED
-}
+#define SPT 200
+#define DIR 25
+#define STEP 26
+#define ENABLE 13
 
-void setDenied()
-{
-  digitalWrite(greenLed, LED_OFF); // Make sure green LED is off
-  digitalWrite(blueLed, LED_OFF);  // Make sure blue LED is off
-  digitalWrite(redLed, LED_ON);    // Turn on red LED
-}
+#define EEPROM_SIZE 256
+byte storedCard[4]; // Stores an ID read from EEPROM
+
+ //"http://192.168.1.116/door?card="
+#define url "192.168.3.2"
+#define port 80
+
+WiFiClient wifi;
+HttpClient client = HttpClient(wifi, url, port);
+
+#define SECRET_SSID "GO-FT"    // replace MySSID with your WiFi network name
+#define SECRET_PASS "GOtech!!" // replace MyPassword with your WiFi password
+
+AsyncWebServer server{80};
+
+int status = WL_IDLE_STATUS;
 
 void setIdle()
 {
@@ -55,31 +61,43 @@ void setIdle()
   digitalWrite(greenLed, LED_OFF); // Make sure Green LED is off
 }
 
-void setRed(boolean state)
+void stepperTurn(String direction)
 {
-  digitalWrite(redLed, state); // Make sure Red LED is off
+  digitalWrite(ENABLE, LOW);
+  if (direction == "left")
+    digitalWrite(DIR, LOW);
+  else
+    digitalWrite(DIR, HIGH);
+  for (int i = 0; i < SPT; i++)
+  {
+    digitalWrite(STEP, HIGH);
+    delay(10);
+    digitalWrite(STEP, LOW);
+    delay(10);
+  }
+  digitalWrite(ENABLE, HIGH);
 }
 
-void blinkRed(int count)
+void open(int setDelay)
 {
-  for (int i = 0; i < count; i++)
-  {
-    digitalWrite(redLed, LED_OFF); // visualize successful wipe
-    delay(200);
-    digitalWrite(redLed, LED_ON);
-    delay(200);
-  }
+  Serial.println("Access Granted");
+  digitalWrite(blueLed, LED_OFF);
+  digitalWrite(redLed, LED_OFF);
+  digitalWrite(greenLed, LED_ON);
+  stepperTurn("right");
+  delay(setDelay);
+  stepperTurn("left");
+  setIdle();
 }
 
-void blinkBuildin(int count)
+void denied()
 {
-  for (int i = 0; i < count; i++)
-  {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(200);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(200);
-  }
+  Serial.println("Access denied");
+  digitalWrite(greenLed, LED_OFF);
+  digitalWrite(blueLed, LED_OFF);
+  digitalWrite(redLed, LED_ON);
+  delay(1000);
+  setIdle();
 }
 
 byte *getID()
@@ -102,58 +120,6 @@ byte *getID()
   return readCard;
 }
 
-void stepperTurn(String direction)
-{
-  digitalWrite(ENABLE, LOW);
-  if (direction == "left")
-    digitalWrite(DIR, LOW);
-  else
-    digitalWrite(DIR, HIGH);
-  for (int i = 0; i < SPT; i++)
-  {
-    digitalWrite(STEP, HIGH);
-    delay(10);
-    digitalWrite(STEP, LOW);
-    delay(10);
-  }
-  digitalWrite(ENABLE, HIGH);
-}
-
-void setupLeds()
-{
-  pinMode(redLed, OUTPUT);
-  pinMode(greenLed, OUTPUT);
-  pinMode(blueLed, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(groundLed, OUTPUT);
-
-  digitalWrite(redLed, LED_OFF);   // Make sure led is off
-  digitalWrite(greenLed, LED_OFF); // Make sure led is off
-  digitalWrite(blueLed, LED_OFF);  // Make sure led is off
-  digitalWrite(groundLed, LOW);
-}
-
-void open(int setDelay)
-{
-  Serial.println("Access Granted");
-  setGranted();
-  stepperTurn("right");
-  delay(setDelay);
-  stepperTurn("left");
-  setIdle();
-}
-
-void denied()
-{
-  Serial.println("Access denied");
-  setDenied();
-  delay(1000);
-  setIdle();
-}
-
-#define EEPROM_SIZE 256
-byte storedCard[4]; // Stores an ID read from EEPROM
-
 boolean checkTwo(byte a[], byte b[])
 {
   bool match = false;
@@ -174,7 +140,7 @@ boolean checkTwo(byte a[], byte b[])
   }
 }
 
-void whipe()
+void wipe()
 { // If button still be pressed, wipe EEPROM
   Serial.println(F("Starting Wiping EEPROM"));
   for (int x = 0; x < EEPROM.length(); x = x + 1)
@@ -285,48 +251,27 @@ void deleteID(byte a[])
   }
 }
 
-#define address "http://192.168.1.132/door?card="
-#define ip "192.168.1.116"
-#define port 80
-
-#define SECRET_SSID "GO-FT"    // replace MySSID with your WiFi network name
-#define SECRET_PASS "GOtech!!" // replace MyPassword with your WiFi password
-
-AsyncWebServer server{80};
-
-WiFiClient wifi;
-HttpClient client{wifi, ip, port};
-int status = WL_IDLE_STATUS;
-
 bool checkID(byte id[4])
 {
   StaticJsonDocument<200> doc;
   String cardId = "0";
-  for (int i = 0; i <= 3; i++)
-  {
-    cardId += id[i];
-  }
+  for (int i = 0; i <= 3; i++) cardId += id[i];
   Serial.print("Card ID: ");
   Serial.println(cardId);
   if ((WiFi.status() == WL_CONNECTED))
-  { //Check the current connection status
+  {
     Serial.println("making GET request");
     client.beginRequest();
-    client.get("/door?card=" + cardId);
-    //client.sendHeader("X-CUSTOM-HEADER", "custom_value");
+    client.get("/door?card="+cardId);
     client.endRequest();
 
-    // read the status code and body of the response
     int statusCode = client.responseStatusCode();
     String response = client.responseBody();
-
     Serial.print("GET Status code: ");
     Serial.println(statusCode);
-    Serial.print("GET Response: ");
-    Serial.println(response);
 
     if (statusCode == 200)
-    { //Check for the returning code
+    {
       Serial.println(response);
       DeserializationError error = deserializeJson(doc, response);
       if (error)
@@ -335,20 +280,23 @@ bool checkID(byte id[4])
         Serial.println(error.c_str());
         return false;
       }
-      if (!findID(id) && doc["open"])
+      if (doc["open"])
       {
+        Serial.print(F("Permission allowed"));
         writeID(id);
       }
       else if (!doc["open"]) {
+        Serial.print(F("Permission denied, deleting card from EEPROM"));
         deleteID(id);
       }
       return doc["open"];
     }
     else
     {
-      Serial.println("Error on HTTP request");
+      Serial.println("Http error " + statusCode);
     }
   }
+  Serial.print("Not connected to Wifi. Searching in EEPROM");
   if (findID(id))
   {
     Serial.println("Found id in EEPROM");
@@ -362,45 +310,61 @@ bool checkID(byte id[4])
 void setup()
 {
   Serial.begin(115200);
-  SPI.begin();        // MFRC522 Hardware uses SPI protocol
-  mfrc522.PCD_Init(); // Initialize MFRC522 Hardware
-  //If you set Antenna Gain to Max it will increase reading distance
+
+  SPI.begin();
+  mfrc522.PCD_Init();
   mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
-  //whipe EEPROM if button pressed
+
+  client.setHttpResponseTimeout(2000);
+
   pinMode(DIR, OUTPUT); //Stepper outputs
   pinMode(STEP, OUTPUT);
   pinMode(ENABLE, OUTPUT);
 
   digitalWrite(ENABLE, HIGH); //Turn stepper motor off
 
-  setupLeds();
+  pinMode(redLed, OUTPUT);
+  pinMode(greenLed, OUTPUT);
+  pinMode(blueLed, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(groundLed, OUTPUT);
+
+  digitalWrite(redLed, LED_OFF);
+  digitalWrite(greenLed, LED_OFF);
+  digitalWrite(blueLed, LED_OFF);
+  digitalWrite(groundLed, LOW);
 
   EEPROM.begin(EEPROM_SIZE);
 
   delay(4000);
   WiFi.begin(SECRET_SSID, SECRET_PASS);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(1000);
+  for (int i = 0; i < 10; i++) {
+        delay(1000);
     Serial.println("Connecting to WiFi..");
+    if (WiFi.status() == WL_CONNECTED) break;
   }
-  Serial.println("Connected to the WiFi network");
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+  if(WiFi.status() == WL_CONNECTED) Serial.println("Connected to the WiFi network");
+  else Serial.println("Could not connect to the WiFi network");
+
   AsyncElegantOTA.begin(&server, SECRET_SSID, SECRET_PASS);
   server.begin();
 
+  //wipe EEPROM if button pressed
   if (digitalRead(wipeB) == LOW)
-  { // when button pressed pin should get low, button connected to ground
-    setRed(1);
+  {
+    digitalWrite(redLed, LED_ON);
     Serial.println(F("Wipe Button Pressed"));
     Serial.println(F("You have 15 seconds to Cancel"));
     Serial.println(F("This will be remove all records and cannot be undone"));
     delay(5000); // Give user enough time to cancel operation
     if (digitalRead(wipeB) == LOW)
-      whipe();
+      wipe();
     else
     {
       Serial.println(F("Wiping Cancelled"));
-      setRed(0);
+      digitalWrite(redLed, LED_OFF);
     }
   }
   setIdle();
@@ -410,11 +374,19 @@ void loop()
 {
   do
   {
-    Serial.println("loop");
+    if(millis() >= time_now + period){
+        time_now += period;
+          mfrc522.PCD_Init();
+          mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
+          if (WiFi.status() != WL_CONNECTED)   WiFi.begin(SECRET_SSID, SECRET_PASS);
+    }
+    if (WiFi.status() == WL_CONNECTED) digitalWrite(LED_BUILTIN, HIGH);
+    else digitalWrite(LED_BUILTIN, LOW);
     AsyncElegantOTA.loop();
     successRead = getID();
 
   } while (successRead == 0);
+    digitalWrite(blueLed, LED_OFF);   // Blue LED ON and ready to read card
   if (checkID(successRead))
     open(openTime);
   else
