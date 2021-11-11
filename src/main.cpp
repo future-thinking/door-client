@@ -293,16 +293,11 @@ void deleteID(byte a[])
   }
 }
 
-//#define address "http://192.168.1.132/door?card="
-#define ip "192.168.1.116"
-#define port 80
-
-
 
 #define SECRET_SSID "GO-FT"    // replace MySSID with your WiFi network name
 #define SECRET_PASS "GOtech!!" // replace MyPassword with your WiFi password
 
-const char* mqtt_server = "192.168.178.77"; //Ip of GO-FT broker is 192.168.3.186 
+const char* mqtt_server = "192.168.3.2"; //Ip of GO-FT broker is 192.168.3.186 
 
 
 AsyncWebServer server{80};
@@ -332,7 +327,7 @@ bool checkID(byte id[4])
     
     cardId.toCharArray(tempvar,cardId.length());
 
-    client.publish("door/checkCard", tempvar);
+    client.publish("door/card", tempvar);
 
     // Wait 3 seconds for a response
     unsigned long previousMillis = millis(); 
@@ -353,6 +348,10 @@ bool checkID(byte id[4])
         accessGranted = false;
         response = false;
 
+        if(!findID(id)){
+          writeID(id);
+
+        }
         return true;
       }else {
         return false;
@@ -387,12 +386,12 @@ void callback(char* topic, byte* message, unsigned int length) {
   Serial.println();
 
   if (strcmp (topic, "door/open") == 0){
-    if (messageTemp == "True")
+    if (messageTemp == "true")
     {
       open(openTime);
       accessGranted = true;
       
-    }else if (messageTemp == "False"){
+    }else if (messageTemp == "false"){
       deleteID(readCard);
     }
     
@@ -473,25 +472,6 @@ void loop()
     //Serial.println("loop");
     AsyncElegantOTA.loop();
     successRead = getID();
-    /* uncomment to add a new card by pressing a button
-    if(digitalRead(14) == LOW){
-
-      Serial.println("add new Card:");
-      delay(500);
-      while (digitalRead(14) == HIGH)
-      {
-        successRead = getID();
-        if (successRead)
-        {
-          writeID(successRead);
-        }
-        
-      }
-      delay(1000);
-      }
-      */
-      
-  
 
   } while (successRead == 0);
   if (!checkID(successRead))
