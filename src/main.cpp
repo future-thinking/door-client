@@ -1,35 +1,25 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <ArduinoHttpClient.h>
 #include <AsyncTCP.h>
 #include <AsyncElegantOTA.h>
 #include <ArduinoJson.h>
 #include "ESPAsyncWebServer.h"
 #include <EEPROM.h>
-#include <MFRC522.h>
+#include <Wire.h>
+#include <Adafruit_PN532.h>
 #include <PubSubClient.h>
+
+#include "secrets.h"
 
 #define openTime 5000 // Time before locking the door again
 #define wipeB 3
 
-
-
-#define SS_PIN 21
-#define RST_PIN 22
-
-byte *successRead;
-byte readCard[4]; // Stores scanned ID read from RFID Module
-boolean accessGranted = false;
-const long timeout = 3000;            // timeout for mqtt request
-boolean response = false;             // if we got a response from mqtt
-
-
-MFRC522 mfrc522(SS_PIN, RST_PIN);
+#define PN532_IRQ 19
+#define PN532_RESET 18
 
 #define LED_ON HIGH
 #define LED_OFF LOW
 
-//pins
 #define redLed 16
 #define greenLed 5
 #define blueLed 17
@@ -39,6 +29,30 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);
 #define DIR 25    //Stepper Pins
 #define STEP 26   //Stepper Pins
 #define ENABLE 13 //Stepper Pins
+
+#define EEPROM_SIZE 256
+
+byte *successRead;
+byte readCard[4]; // Stores scanned ID read from RFID Module
+byte storedCard[4]; // Stores an ID read from EEPROM
+boolean accessGranted = false;
+const long timeout = 3000;            // timeout for mqtt request
+boolean response = false;             // if we got a response from mqtt
+
+Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+const int DELAY_BETWEEN_CARDS = 500;
+long timeLastCardRead = 0;
+boolean readerDisabled = false;
+int irqCurr;
+int irqPrev;
+
+const char* mqtt_server = "192.168.178.51"; //Ip of GO-FT broker is 192.168.3.2
+
+AsyncWebServer server{80};
+
+WiFiClient wifi;
+PubSubClient client(wifi);
+int status = WL_IDLE_STATUS;
 
 void setGranted()
 {
@@ -90,22 +104,35 @@ void blinkBuildin(int count)
 
 byte * getID()
 {
-  if (!mfrc522.PICC_IsNewCardPresent())
-    return 0;
-  if (!mfrc522.PICC_ReadCardSerial())
-    return 0;
-  // There are Mifare PICCs which have 4 byte or 7 byte UID care if you use 7 byte PICC
-  // I think we should assume every PICC as they have 4 byte UID
-  // Until we support 7 byte PICCs
-  Serial.println(F("Scanned PICC's UID:"));
-  for (int i = 0; i < 4; i++)
-  {
-    readCard[i] = mfrc522.uid.uidByte[i];
-    //Serial.print(readCard[i], HEX);
-  }
-  //Serial.println("");
-  mfrc522.PICC_HaltA(); // Stop reading
-  return readCard;
+    // The reader will be enabled again after DELAY_BETWEEN_CARDS ms will pass.
+    readerDisabled = true;
+ 
+    uint8_t success = false;
+    uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+    uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+
+    // read the NFC tag's info
+    success = nfc.readDetectedPassiveTargetID(uid, &uidLength);
+    Serial.println(success ? "Read successful" : "Read failed (not a card?)");
+
+    if (success) {
+      // Display some basic information about the card
+      Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
+      Serial.print("  UID Value: ");
+      nfc.PrintHex(uid, uidLength);
+      
+      for (int i = 0; i < 4; i++)
+      {
+        readCard[i] = uid[i];
+      }
+      
+
+      Serial.println("");
+
+      timeLastCardRead = millis();
+      return readCard;
+    } else return 0;
+
 }
 
 void stepperTurn(String direction)
@@ -158,9 +185,6 @@ void denied()
   setIdle();
 }
 
-#define EEPROM_SIZE 256
-byte storedCard[4]; // Stores an ID read from EEPROM
-
 boolean checkTwo(byte a[], byte b[])
 {
   bool match = false;
@@ -181,7 +205,7 @@ boolean checkTwo(byte a[], byte b[])
   }
 }
 
-void whipe()
+void wipe()
 { // If button still be pressed, wipe EEPROM
   Serial.println(F("Starting Wiping EEPROM"));
   for (int x = 0; x < EEPROM.length(); x = x + 1)
@@ -190,10 +214,7 @@ void whipe()
     { //If EEPROM address 0
       // do nothing, already clear, go to the next address in order to save time and reduce writes to EEPROM
     }
-    else
-    {
-      EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS
-    }
+    else EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS
   }
   Serial.println(F("EEPROM Successfully Wiped"));
   //blink led red
@@ -293,28 +314,11 @@ void deleteID(byte a[])
   }
 }
 
-
-#define SECRET_SSID "GO-FT"    // replace MySSID with your WiFi network name
-#define SECRET_PASS "GOtech!!" // replace MyPassword with your WiFi password
-
-const char* mqtt_server = "192.168.3.2"; //Ip of GO-FT broker is 192.168.3.186 
-
-
-AsyncWebServer server{80};
-
-WiFiClient wifi;
-PubSubClient client(wifi);
-
-//HttpClient client{wifi, ip, port};
-int status = WL_IDLE_STATUS;
-
 bool checkID(byte id[4])
 {
   String cardId = "0";
-  for (int i = 0; i <= 3; i++)
-  {
-    cardId += id[i];
-  }
+  for (int i = 0; i <= 3; i++) cardId += id[i];
+
   Serial.print("Card ID: ");
   Serial.println(cardId);
 
@@ -335,25 +339,20 @@ bool checkID(byte id[4])
     do
     {
       client.loop();
-    
-
-      if (millis() - previousMillis > timeout){break;}
+      if (millis() - previousMillis > timeout) break;
     } while (!response);
     Serial.println("Ended while response: " + response);
     if (response)
     {
       if (accessGranted)
-      {
-        
+      {   
         accessGranted = false;
         response = false;
 
-        if(!findID(id)){
-          writeID(id);
-
-        }
+        if(!findID(id)) writeID(id);
         return true;
-      }else {
+      } else {
+        deleteID(id);
         return false;
       }
     }
@@ -401,14 +400,18 @@ void callback(char* topic, byte* message, unsigned int length) {
   }
 }
 
+void startListeningToNFC() {
+  // Reset our IRQ indicators
+  irqPrev = irqCurr = HIGH;
+  
+  Serial.println("Waiting for an ISO14443A Card ...");
+  nfc.startPassiveTargetIDDetection(PN532_MIFARE_ISO14443A);
+}
+
 void setup()
 {
   Serial.begin(115200);
-  SPI.begin();        // MFRC522 Hardware uses SPI protocol
-  mfrc522.PCD_Init(); // Initialize MFRC522 Hardware
-  //If you set Antenna Gain to Max it will increase reading distance
-  mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
-  //whipe EEPROM if button pressed
+
   pinMode(DIR, OUTPUT); //Stepper outputs
   pinMode(STEP, OUTPUT);
   pinMode(ENABLE, OUTPUT);
@@ -419,6 +422,9 @@ void setup()
   digitalWrite(ENABLE, HIGH); //Turn stepper motor off
 
   setupLeds();
+
+  nfc.begin();
+  nfc.SAMConfig();
 
   EEPROM.begin(EEPROM_SIZE);
 
@@ -443,6 +449,7 @@ void setup()
 
   client.subscribe("door/open");
 
+  //wipe EEPROM if button pressed
   if (digitalRead(wipeB) == LOW)
   { // when button pressed pin should get low, button connected to ground
     setRed(1);
@@ -451,16 +458,19 @@ void setup()
     Serial.println(F("This will be remove all records and cannot be undone"));
     delay(5000); // Give user enough time to cancel operation
     if (digitalRead(wipeB) == LOW)
-      whipe();
+      wipe();
     else
     {
       Serial.println(F("Wiping Cancelled"));
       setRed(0);
     }
   }
+
   setIdle();
 
   pinMode(14, INPUT_PULLUP);
+
+  startListeningToNFC();
 }
 
 void loop()
@@ -468,18 +478,21 @@ void loop()
   successRead = 0;
   do
   {
-    client.loop();
-    //Serial.println("loop");
-    AsyncElegantOTA.loop();
-    successRead = getID();
+    client.loop(); // mqtt
 
-  } while (successRead == 0);
-  if (!checkID(successRead))
-  {
-
-    denied();
-  }else{
-    Serial.println("return");
+  if (readerDisabled) {
+    if (millis() - timeLastCardRead > DELAY_BETWEEN_CARDS) {
+      readerDisabled = false;
+      startListeningToNFC();
+    }
+  } else {
+    irqCurr = digitalRead(PN532_IRQ);
+    // When the IRQ is pulled low - the reader has got something for us.
+    if (irqCurr == LOW && irqPrev == HIGH) successRead = getID();
+    irqPrev = irqCurr;
   }
   
+  } while (successRead == 0);
+  if (!checkID(successRead)) denied();
+  else Serial.println("return");
 }
