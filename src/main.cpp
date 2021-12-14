@@ -1,29 +1,25 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <ArduinoHttpClient.h>
 #include <AsyncTCP.h>
 #include <AsyncElegantOTA.h>
 #include <ArduinoJson.h>
 #include "ESPAsyncWebServer.h"
 #include <EEPROM.h>
-#include <MFRC522.h>
+#include <Wire.h>
+#include <Adafruit_PN532.h>
+#include <PubSubClient.h>
+
+#include "secrets.h"
 
 #define openTime 5000 // Time before locking the door again
 #define wipeB 3
 
-byte *successRead;
-
-#define SS_PIN 21
-#define RST_PIN 22
-
-byte readCard[4]; // Stores scanned ID read from RFID Module
-
-MFRC522 mfrc522(SS_PIN, RST_PIN);
+#define PN532_IRQ 19
+#define PN532_RESET 18
 
 #define LED_ON HIGH
 #define LED_OFF LOW
 
-//pins
 #define redLed 16
 #define greenLed 5
 #define blueLed 17
@@ -32,10 +28,36 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);
 int period = 100000;
 unsigned long time_now = 0;
 
-#define SPT 200
-#define DIR 25
-#define STEP 26
-#define ENABLE 13
+#define EEPROM_SIZE 256
+
+byte *successRead;
+byte readCard[4]; // Stores scanned ID read from RFID Module
+byte storedCard[4]; // Stores an ID read from EEPROM
+boolean accessGranted = false;
+const long timeout = 3000;            // timeout for mqtt request
+boolean response = false;             // if we got a response from mqtt
+
+Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+const int DELAY_BETWEEN_CARDS = 500;
+long timeLastCardRead = 0;
+boolean readerDisabled = false;
+int irqCurr;
+int irqPrev;
+
+const char* mqtt_server = "192.168.178.51"; //Ip of GO-FT broker is 192.168.3.2
+
+AsyncWebServer server{80};
+
+WiFiClient wifi;
+PubSubClient client(wifi);
+int status = WL_IDLE_STATUS;
+
+void setGranted()
+{
+  digitalWrite(blueLed, LED_OFF); // Turn off blue LED
+  digitalWrite(redLed, LED_OFF);  // Turn off red LED
+  digitalWrite(greenLed, LED_ON); // Turn on green LED
+}
 
 #define EEPROM_SIZE 256
 byte storedCard[4]; // Stores an ID read from EEPROM
@@ -61,6 +83,66 @@ void setIdle()
   digitalWrite(greenLed, LED_OFF); // Make sure Green LED is off
 }
 
+void setRed(boolean state)
+{
+  digitalWrite(redLed, state); // Make sure Red LED is off
+}
+
+void blinkRed(int count)
+{
+  for (int i = 0; i < count; i++)
+  {
+    digitalWrite(redLed, LED_OFF); // visualize successful wipe
+    delay(200);
+    digitalWrite(redLed, LED_ON);
+    delay(200);
+  }
+}
+
+void blinkBuildin(int count)
+{
+  for (int i = 0; i < count; i++)
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(200);
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(200);
+  }
+}
+
+byte * getID()
+{
+    // The reader will be enabled again after DELAY_BETWEEN_CARDS ms will pass.
+    readerDisabled = true;
+ 
+    uint8_t success = false;
+    uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+    uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+
+    // read the NFC tag's info
+    success = nfc.readDetectedPassiveTargetID(uid, &uidLength);
+    Serial.println(success ? "Read successful" : "Read failed (not a card?)");
+
+    if (success) {
+      // Display some basic information about the card
+      Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
+      Serial.print("  UID Value: ");
+      nfc.PrintHex(uid, uidLength);
+      
+      for (int i = 0; i < 4; i++)
+      {
+        readCard[i] = uid[i];
+      }
+      
+
+      Serial.println("");
+
+      timeLastCardRead = millis();
+      return readCard;
+    } else return 0;
+
+}
+
 void stepperTurn(String direction)
 {
   digitalWrite(ENABLE, LOW);
@@ -80,6 +162,7 @@ void stepperTurn(String direction)
 
 void open(int setDelay)
 {
+  accessGranted = true;
   Serial.println("Access Granted");
   digitalWrite(blueLed, LED_OFF);
   digitalWrite(redLed, LED_OFF);
@@ -98,26 +181,6 @@ void denied()
   digitalWrite(redLed, LED_ON);
   delay(1000);
   setIdle();
-}
-
-byte *getID()
-{
-  if (!mfrc522.PICC_IsNewCardPresent())
-    return 0;
-  if (!mfrc522.PICC_ReadCardSerial())
-    return 0;
-  // There are Mifare PICCs which have 4 byte or 7 byte UID care if you use 7 byte PICC
-  // I think we should assume every PICC as they have 4 byte UID
-  // Until we support 7 byte PICCs
-  Serial.println(F("Scanned PICC's UID:"));
-  for (int i = 0; i < 4; i++)
-  {
-    readCard[i] = mfrc522.uid.uidByte[i];
-    Serial.print(readCard[i], HEX);
-  }
-  Serial.println("");
-  mfrc522.PICC_HaltA(); // Stop reading
-  return readCard;
 }
 
 boolean checkTwo(byte a[], byte b[])
@@ -149,10 +212,7 @@ void wipe()
     { //If EEPROM address 0
       // do nothing, already clear, go to the next address in order to save time and reduce writes to EEPROM
     }
-    else
-    {
-      EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS
-    }
+    else EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS
   }
   Serial.println(F("EEPROM Successfully Wiped"));
   //blink led red
@@ -203,6 +263,7 @@ void writeID(byte a[])
   {
     Serial.println(F("Failed! There is something wrong with ID or bad EEPROM"));
   }
+  EEPROM.commit();
 }
 
 int findIDSLOT(byte find[])
@@ -253,53 +314,53 @@ void deleteID(byte a[])
 
 bool checkID(byte id[4])
 {
-  StaticJsonDocument<200> doc;
   String cardId = "0";
   for (int i = 0; i <= 3; i++) cardId += id[i];
+
   Serial.print("Card ID: ");
   Serial.println(cardId);
-  if ((WiFi.status() == WL_CONNECTED))
-  {
-    Serial.println("making GET request");
-    client.beginRequest();
-    client.get("/door?card="+cardId);
-    client.endRequest();
 
-    int statusCode = client.responseStatusCode();
-    String response = client.responseBody();
-    Serial.print("GET Status code: ");
-    Serial.println(statusCode);
+  if ((WiFi.status() == WL_CONNECTED) && client.connected())
+  { //Check the current connection status
+    response = false;
 
-    if (statusCode == 200)
+    char tempvar [cardId.length()];
+    accessGranted = false;
+    
+    cardId.toCharArray(tempvar,cardId.length());
+
+    client.publish("door/card", tempvar);
+
+    // Wait 3 seconds for a response
+    unsigned long previousMillis = millis(); 
+    
+    do
     {
-      Serial.println(response);
-      DeserializationError error = deserializeJson(doc, response);
-      if (error)
-      {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.c_str());
+      client.loop();
+      if (millis() - previousMillis > timeout) break;
+    } while (!response);
+    Serial.println("Ended while response: " + response);
+    if (response)
+    {
+      if (accessGranted)
+      {   
+        accessGranted = false;
+        response = false;
+
+        if(!findID(id)) writeID(id);
+        return true;
+      } else {
+        deleteID(id);
         return false;
       }
-      if (doc["open"])
-      {
-        Serial.print(F("Permission allowed"));
-        writeID(id);
-      }
-      else if (!doc["open"]) {
-        Serial.print(F("Permission denied, deleting card from EEPROM"));
-        deleteID(id);
-      }
-      return doc["open"];
-    }
-    else
-    {
-      Serial.println("Http error " + statusCode);
     }
   }
-  Serial.print("Not connected to Wifi. Searching in EEPROM");
+
+  Serial.println("No response from mqtt looking in EEPROM");
   if (findID(id))
   {
     Serial.println("Found id in EEPROM");
+    open(openTime);
     return true;
   }
   else
@@ -307,19 +368,54 @@ bool checkID(byte id[4])
     return false;
 }
 
+void callback(char* topic, byte* message, unsigned int length) {
+  response = true;
+  Serial.println();
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+  
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  if (strcmp (topic, "door/open") == 0){
+    if (messageTemp == "true")
+    {
+      open(openTime);
+      accessGranted = true;
+      
+    }else if (messageTemp == "false"){
+      deleteID(readCard);
+    }
+    
+  }else if (messageTemp == "")
+  {
+    
+  }
+}
+
+void startListeningToNFC() {
+  // Reset our IRQ indicators
+  irqPrev = irqCurr = HIGH;
+  
+  Serial.println("Waiting for an ISO14443A Card ...");
+  nfc.startPassiveTargetIDDetection(PN532_MIFARE_ISO14443A);
+}
+
 void setup()
 {
   Serial.begin(115200);
 
-  SPI.begin();
-  mfrc522.PCD_Init();
-  mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
-
-  client.setHttpResponseTimeout(2000);
-
   pinMode(DIR, OUTPUT); //Stepper outputs
   pinMode(STEP, OUTPUT);
   pinMode(ENABLE, OUTPUT);
+
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
 
   digitalWrite(ENABLE, HIGH); //Turn stepper motor off
 
@@ -329,10 +425,8 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(groundLed, OUTPUT);
 
-  digitalWrite(redLed, LED_OFF);
-  digitalWrite(greenLed, LED_OFF);
-  digitalWrite(blueLed, LED_OFF);
-  digitalWrite(groundLed, LOW);
+  nfc.begin();
+  nfc.SAMConfig();
 
   EEPROM.begin(EEPROM_SIZE);
 
@@ -343,13 +437,19 @@ void setup()
     Serial.println("Connecting to WiFi..");
     if (WiFi.status() == WL_CONNECTED) break;
   }
-  WiFi.setAutoReconnect(true);
-  WiFi.persistent(true);
-  if(WiFi.status() == WL_CONNECTED) Serial.println("Connected to the WiFi network");
-  else Serial.println("Could not connect to the WiFi network");
-
+  
+  Serial.println("Connected to the WiFi network");
   AsyncElegantOTA.begin(&server, SECRET_SSID, SECRET_PASS);
   server.begin();
+
+  while (!client.connected())
+  {
+    client.connect("doorESP23"); 
+    Serial.println("trying to connect to mqtt");
+  }
+  Serial.println("mqtt is connected");
+
+  client.subscribe("door/open");
 
   //wipe EEPROM if button pressed
   if (digitalRead(wipeB) == LOW)
@@ -367,28 +467,34 @@ void setup()
       digitalWrite(redLed, LED_OFF);
     }
   }
+
   setIdle();
+
+  pinMode(14, INPUT_PULLUP);
+
+  startListeningToNFC();
 }
 
 void loop()
 {
+  successRead = 0;
   do
   {
-    if(millis() >= time_now + period){
-        time_now += period;
-          mfrc522.PCD_Init();
-          mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
-          if (WiFi.status() != WL_CONNECTED)   WiFi.begin(SECRET_SSID, SECRET_PASS);
-    }
-    if (WiFi.status() == WL_CONNECTED) digitalWrite(LED_BUILTIN, HIGH);
-    else digitalWrite(LED_BUILTIN, LOW);
-    AsyncElegantOTA.loop();
-    successRead = getID();
+    client.loop(); // mqtt
 
+  if (readerDisabled) {
+    if (millis() - timeLastCardRead > DELAY_BETWEEN_CARDS) {
+      readerDisabled = false;
+      startListeningToNFC();
+    }
+  } else {
+    irqCurr = digitalRead(PN532_IRQ);
+    // When the IRQ is pulled low - the reader has got something for us.
+    if (irqCurr == LOW && irqPrev == HIGH) successRead = getID();
+    irqPrev = irqCurr;
+  }
+  
   } while (successRead == 0);
-    digitalWrite(blueLed, LED_OFF);   // Blue LED ON and ready to read card
-  if (checkID(successRead))
-    open(openTime);
-  else
-    denied();
+  if (!checkID(successRead)) denied();
+  else Serial.println("return");
 }
