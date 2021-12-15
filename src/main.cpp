@@ -25,8 +25,10 @@
 #define blueLed 17
 #define groundLed 4
 
-int period = 100000;
-unsigned long time_now = 0;
+#define SPT 200   //Steps per turn
+#define DIR 25    //Stepper Pins
+#define STEP 26   //Stepper Pins
+#define ENABLE 13 //Stepper Pins
 
 #define EEPROM_SIZE 256
 
@@ -59,22 +61,12 @@ void setGranted()
   digitalWrite(greenLed, LED_ON); // Turn on green LED
 }
 
-#define EEPROM_SIZE 256
-byte storedCard[4]; // Stores an ID read from EEPROM
-
- //"http://192.168.1.116/door?card="
-#define url "192.168.3.2"
-#define port 80
-
-WiFiClient wifi;
-HttpClient client = HttpClient(wifi, url, port);
-
-#define SECRET_SSID "GO-FT"    // replace MySSID with your WiFi network name
-#define SECRET_PASS "GOtech!!" // replace MyPassword with your WiFi password
-
-AsyncWebServer server{80};
-
-int status = WL_IDLE_STATUS;
+void setDenied()
+{
+  digitalWrite(greenLed, LED_OFF); // Make sure green LED is off
+  digitalWrite(blueLed, LED_OFF);  // Make sure blue LED is off
+  digitalWrite(redLed, LED_ON);    // Turn on red LED
+}
 
 void setIdle()
 {
@@ -160,13 +152,25 @@ void stepperTurn(String direction)
   digitalWrite(ENABLE, HIGH);
 }
 
+void setupLeds()
+{
+  pinMode(redLed, OUTPUT);
+  pinMode(greenLed, OUTPUT);
+  pinMode(blueLed, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(groundLed, OUTPUT);
+
+  digitalWrite(redLed, LED_OFF);   // Make sure led is off
+  digitalWrite(greenLed, LED_OFF); // Make sure led is off
+  digitalWrite(blueLed, LED_OFF);  // Make sure led is off
+  digitalWrite(groundLed, LOW);
+}
+
 void open(int setDelay)
 {
   accessGranted = true;
   Serial.println("Access Granted");
-  digitalWrite(blueLed, LED_OFF);
-  digitalWrite(redLed, LED_OFF);
-  digitalWrite(greenLed, LED_ON);
+  setGranted();
   stepperTurn("right");
   delay(setDelay);
   stepperTurn("left");
@@ -176,9 +180,7 @@ void open(int setDelay)
 void denied()
 {
   Serial.println("Access denied");
-  digitalWrite(greenLed, LED_OFF);
-  digitalWrite(blueLed, LED_OFF);
-  digitalWrite(redLed, LED_ON);
+  setDenied();
   delay(1000);
   setIdle();
 }
@@ -419,11 +421,7 @@ void setup()
 
   digitalWrite(ENABLE, HIGH); //Turn stepper motor off
 
-  pinMode(redLed, OUTPUT);
-  pinMode(greenLed, OUTPUT);
-  pinMode(blueLed, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(groundLed, OUTPUT);
+  setupLeds();
 
   nfc.begin();
   nfc.SAMConfig();
@@ -432,10 +430,10 @@ void setup()
 
   delay(4000);
   WiFi.begin(SECRET_SSID, SECRET_PASS);
-  for (int i = 0; i < 10; i++) {
-        delay(1000);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(1000);
     Serial.println("Connecting to WiFi..");
-    if (WiFi.status() == WL_CONNECTED) break;
   }
   
   Serial.println("Connected to the WiFi network");
@@ -453,8 +451,8 @@ void setup()
 
   //wipe EEPROM if button pressed
   if (digitalRead(wipeB) == LOW)
-  {
-    digitalWrite(redLed, LED_ON);
+  { // when button pressed pin should get low, button connected to ground
+    setRed(1);
     Serial.println(F("Wipe Button Pressed"));
     Serial.println(F("You have 15 seconds to Cancel"));
     Serial.println(F("This will be remove all records and cannot be undone"));
@@ -464,7 +462,7 @@ void setup()
     else
     {
       Serial.println(F("Wiping Cancelled"));
-      digitalWrite(redLed, LED_OFF);
+      setRed(0);
     }
   }
 
