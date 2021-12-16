@@ -2,12 +2,12 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <AsyncElegantOTA.h>
-#include <ArduinoJson.h>
 #include "ESPAsyncWebServer.h"
 #include <EEPROM.h>
 #include <Wire.h>
 #include <Adafruit_PN532.h>
 #include <PubSubClient.h>
+#include <Adafruit_NeoPixel.h>
 
 #include "secrets.h"
 
@@ -20,17 +20,16 @@
 #define LED_ON HIGH
 #define LED_OFF LOW
 
-#define redLed 16
-#define greenLed 5
-#define blueLed 17
-#define groundLed 4
-
 #define SPT 200   //Steps per turn
 #define DIR 25    //Stepper Pins
 #define STEP 26   //Stepper Pins
 #define ENABLE 13 //Stepper Pins
 
 #define EEPROM_SIZE 256
+
+#define LED_PIN 6
+#define LED_COUNT 116
+
 
 byte *successRead;
 byte readCard[4]; // Stores scanned ID read from RFID Module
@@ -54,53 +53,36 @@ WiFiClient wifi;
 PubSubClient client(wifi);
 int status = WL_IDLE_STATUS;
 
+
+// Declare our NeoPixel strip object:
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_RGB + NEO_KHZ800);
+
+
 void setGranted()
 {
-  digitalWrite(blueLed, LED_OFF); // Turn off blue LED
-  digitalWrite(redLed, LED_OFF);  // Turn off red LED
-  digitalWrite(greenLed, LED_ON); // Turn on green LED
+  strip.fill(0, strip.numPixels(), strip.Color(0, 255, 0));
+  strip.show();
 }
 
 void setDenied()
 {
-  digitalWrite(greenLed, LED_OFF); // Make sure green LED is off
-  digitalWrite(blueLed, LED_OFF);  // Make sure blue LED is off
-  digitalWrite(redLed, LED_ON);    // Turn on red LED
+  strip.fill(0, strip.numPixels(), strip.Color(255, 0, 0));
+  strip.show();
 }
 
 void setIdle()
 {
-  digitalWrite(blueLed, LED_ON);   // Blue LED ON and ready to read card
-  digitalWrite(redLed, LED_OFF);   // Make sure Red LED is off
-  digitalWrite(greenLed, LED_OFF); // Make sure Green LED is off
+  strip.fill(0, strip.numPixels(), strip.Color(0, 0, 255));
+  strip.show();
 }
 
 void setRed(boolean state)
 {
-  digitalWrite(redLed, state); // Make sure Red LED is off
+  strip.fill(0, strip.numPixels(), strip.Color(255, 0, 0));
+  strip.show();
 }
 
-void blinkRed(int count)
-{
-  for (int i = 0; i < count; i++)
-  {
-    digitalWrite(redLed, LED_OFF); // visualize successful wipe
-    delay(200);
-    digitalWrite(redLed, LED_ON);
-    delay(200);
-  }
-}
 
-void blinkBuildin(int count)
-{
-  for (int i = 0; i < count; i++)
-  {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(200);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(200);
-  }
-}
 
 byte * getID()
 {
@@ -154,16 +136,8 @@ void stepperTurn(String direction)
 
 void setupLeds()
 {
-  pinMode(redLed, OUTPUT);
-  pinMode(greenLed, OUTPUT);
-  pinMode(blueLed, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(groundLed, OUTPUT);
 
-  digitalWrite(redLed, LED_OFF);   // Make sure led is off
-  digitalWrite(greenLed, LED_OFF); // Make sure led is off
-  digitalWrite(blueLed, LED_OFF);  // Make sure led is off
-  digitalWrite(groundLed, LOW);
+  
 }
 
 void open(int setDelay)
