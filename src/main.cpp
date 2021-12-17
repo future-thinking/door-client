@@ -17,17 +17,15 @@
 #define PN532_IRQ 19
 #define PN532_RESET 18
 
-#define LED_ON HIGH
-#define LED_OFF LOW
-
+// Stepper
 #define SPT 200   //Steps per turn
-#define DIR 25    //Stepper Pins
-#define STEP 26   //Stepper Pins
-#define ENABLE 13 //Stepper Pins
+#define DIR 25
+#define STEP 26 
+#define ENABLE 13
 
 #define EEPROM_SIZE 256
 
-#define LED_PIN 6
+#define LED_PIN 5
 #define LED_COUNT 116
 
 
@@ -45,7 +43,7 @@ boolean readerDisabled = false;
 int irqCurr;
 int irqPrev;
 
-const char* mqtt_server = "192.168.178.51"; //Ip of GO-FT broker is 192.168.3.2
+const char* mqtt_server = "192.168.3.2"; //Ip of GO-FT broker is 192.168.3.2
 
 AsyncWebServer server{80};
 
@@ -60,35 +58,31 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_RGB + NEO_KHZ800);
 
 void setGranted()
 {
-  strip.fill(0, strip.numPixels(), strip.Color(0, 255, 0));
+  strip.fill(strip.Color(0, 255, 0), 0, strip.numPixels());
   strip.show();
 }
 
 void setDenied()
 {
-  strip.fill(0, strip.numPixels(), strip.Color(255, 0, 0));
+  strip.fill(strip.Color(255, 0, 0), 0, strip.numPixels());
   strip.show();
+}
+
+void setDetected() {
+  strip.fill(strip.Color(0, 0, 255), 0, strip.numPixels());
+  strip.show(); 
 }
 
 void setIdle()
 {
-  strip.fill(0, strip.numPixels(), strip.Color(0, 0, 255));
+  strip.fill(strip.Color(0, 0, 0), 0, strip.numPixels());
   strip.show();
 }
-
-void setRed(boolean state)
-{
-  strip.fill(0, strip.numPixels(), strip.Color(255, 0, 0));
-  strip.show();
-}
-
-
 
 byte * getID()
 {
     // The reader will be enabled again after DELAY_BETWEEN_CARDS ms will pass.
     readerDisabled = true;
- 
     uint8_t success = false;
     uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
     uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
@@ -103,14 +97,7 @@ byte * getID()
       Serial.print("  UID Value: ");
       nfc.PrintHex(uid, uidLength);
       
-      for (int i = 0; i < 4; i++)
-      {
-        readCard[i] = uid[i];
-      }
-      
-
-      Serial.println("");
-
+      for (int i = 0; i < 4; i++) readCard[i] = uid[i];
       timeLastCardRead = millis();
       return readCard;
     } else return 0;
@@ -120,10 +107,8 @@ byte * getID()
 void stepperTurn(String direction)
 {
   digitalWrite(ENABLE, LOW);
-  if (direction == "left")
-    digitalWrite(DIR, LOW);
-  else
-    digitalWrite(DIR, HIGH);
+  if (direction == "left") digitalWrite(DIR, LOW);
+  else digitalWrite(DIR, HIGH);
   for (int i = 0; i < SPT; i++)
   {
     digitalWrite(STEP, HIGH);
@@ -132,12 +117,6 @@ void stepperTurn(String direction)
     delay(10);
   }
   digitalWrite(ENABLE, HIGH);
-}
-
-void setupLeds()
-{
-
-  
 }
 
 void open(int setDelay)
@@ -288,8 +267,7 @@ void deleteID(byte a[])
   }
 }
 
-bool checkID(byte id[4])
-{
+bool checkID(byte id[4]) {
   String cardId = "0";
   for (int i = 0; i <= 3; i++) cardId += id[i];
 
@@ -382,20 +360,21 @@ void startListeningToNFC() {
   nfc.startPassiveTargetIDDetection(PN532_MIFARE_ISO14443A);
 }
 
-void setup()
-{
+void setup() {
   Serial.begin(115200);
 
   pinMode(DIR, OUTPUT); //Stepper outputs
   pinMode(STEP, OUTPUT);
   pinMode(ENABLE, OUTPUT);
 
+  strip.begin();
+  strip.setBrightness(100);
+  strip.show();
+
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
 
   digitalWrite(ENABLE, HIGH); //Turn stepper motor off
-
-  setupLeds();
 
   nfc.begin();
   nfc.SAMConfig();
@@ -426,7 +405,7 @@ void setup()
   //wipe EEPROM if button pressed
   if (digitalRead(wipeB) == LOW)
   { // when button pressed pin should get low, button connected to ground
-    setRed(1);
+    // TODO: Add led Animation 
     Serial.println(F("Wipe Button Pressed"));
     Serial.println(F("You have 15 seconds to Cancel"));
     Serial.println(F("This will be remove all records and cannot be undone"));
@@ -436,36 +415,32 @@ void setup()
     else
     {
       Serial.println(F("Wiping Cancelled"));
-      setRed(0);
+      // TODO: Add led animation
     }
   }
 
   setIdle();
-
-  pinMode(14, INPUT_PULLUP);
-
   startListeningToNFC();
 }
 
-void loop()
-{
+void loop() {
   successRead = 0;
   do
   {
     client.loop(); // mqtt
 
-  if (readerDisabled) {
-    if (millis() - timeLastCardRead > DELAY_BETWEEN_CARDS) {
-      readerDisabled = false;
-      startListeningToNFC();
+    if (readerDisabled) {
+      if (millis() - timeLastCardRead > DELAY_BETWEEN_CARDS) {
+        readerDisabled = false;
+        startListeningToNFC();
+      }
+    } else {
+      irqCurr = digitalRead(PN532_IRQ);
+      // When the IRQ is pulled low - the reader has got something for us.
+      if (irqCurr == LOW && irqPrev == HIGH) successRead = getID();
+      irqPrev = irqCurr;
     }
-  } else {
-    irqCurr = digitalRead(PN532_IRQ);
-    // When the IRQ is pulled low - the reader has got something for us.
-    if (irqCurr == LOW && irqPrev == HIGH) successRead = getID();
-    irqPrev = irqCurr;
-  }
-  
+    
   } while (successRead == 0);
   if (!checkID(successRead)) denied();
   else Serial.println("return");
