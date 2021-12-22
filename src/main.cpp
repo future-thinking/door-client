@@ -119,6 +119,16 @@ void stepperTurn(String direction)
   digitalWrite(ENABLE, HIGH);
 }
 
+<<<<<<< Updated upstream
+=======
+void setupLeds()
+{
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
+
+}
+
+>>>>>>> Stashed changes
 void open(int setDelay)
 {
   accessGranted = true;
