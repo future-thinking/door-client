@@ -119,8 +119,6 @@ void stepperTurn(String direction)
   digitalWrite(ENABLE, HIGH);
 }
 
-<<<<<<< Updated upstream
-=======
 void setupLeds()
 {
   strip.begin();
@@ -128,7 +126,6 @@ void setupLeds()
 
 }
 
->>>>>>> Stashed changes
 void open(int setDelay)
 {
   accessGranted = true;
