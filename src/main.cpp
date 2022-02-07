@@ -9,25 +9,7 @@
 #include <PubSubClient.h>
 #include <Adafruit_NeoPixel.h>
 
-#include "secrets.h"
-
-#define openTime 5000 // Time before locking the door again
-#define wipeB 3
-
-#define PN532_IRQ 19
-#define PN532_RESET 18
-
-// Stepper
-#define SPT 200   //Steps per turn
-#define DIR 25
-#define STEP 26 
-#define ENABLE 13
-
-#define EEPROM_SIZE 256
-
-#define LED_PIN 5
-#define LED_COUNT 116
-
+#include "../Configuration.hpp"
 
 byte *successRead;
 byte readCard[4]; // Stores scanned ID read from RFID Module
@@ -43,7 +25,7 @@ boolean readerDisabled = false;
 int irqCurr;
 int irqPrev;
 
-const char* mqtt_server = "192.168.3.2"; //Ip of GO-FT broker is 192.168.3.2
+const char* mqtt_server = MQTT_SERVER;
 
 AsyncWebServer server{80};
 
@@ -389,7 +371,7 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
 
   delay(4000);
-  WiFi.begin(SECRET_SSID, SECRET_PASS);
+  WiFi.begin(SSID, PASS);
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(1000);
@@ -397,12 +379,12 @@ void setup() {
   }
   
   Serial.println("Connected to the WiFi network");
-  AsyncElegantOTA.begin(&server, SECRET_SSID, SECRET_PASS);
+  AsyncElegantOTA.begin(&server, SSID, PASS);
   server.begin();
 
   while (!client.connected())
   {
-    client.connect("doorESP23"); 
+    client.connect("doorESP23", MQTT_USER, MQTT_PASS); 
     Serial.println("trying to connect to mqtt");
   }
   Serial.println("mqtt is connected");
