@@ -7,5 +7,7 @@ The Esp will either wait for a card to be scanned or a message to be posted to a
 If it detects a card and is connected to wifi and mqtt it will publish the cards ID on the door/card topic wich the server is subscribed to.
 The server then looks up the ID in a MySql database and publish a new message under the door/open topic, either true or false.
 After receiving the answer the ESP saves the card to the EEPROM if the answer was true or deltes the ID from EEPROM if the answer is false and the ID exists.
+If the esp does't have a connection to either wifi or mqtt and a card is scanned it looks up it's ID in the EEPROM. This way if any of the other components fail the lock will still function.
+The esp also reacts to published messages under door/open topic when no card is scanned, this way the door can be opened with a smartphone or other devices loged in to the same mqtt network.
 
 All importent pins and authentication stuff can and need to be changed in the Configuration.hpp see Configuration_sample.hpp for your options.
