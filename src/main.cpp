@@ -130,34 +130,21 @@ void denied()
 boolean checkTwo(byte a[], byte b[])
 {
   bool match = false;
-  if (a[0])       // Make sure there is something in the array first
-    match = true; // Assume they match at first
+  if (a[0]) match = true; // Make sure there is something in the array first and Assume they match at first
   for (int k = 0; k < 4; k++)
   {                   // Loop 4 times
     if (a[k] != b[k]) // IF a != b then set match = false, one fails, all fail
       match = false;
   }
-  if (match)
-  {              // Check to see if if match is still true
-    return true; // Return true
-  }
-  else
-  {
-    return false; // Return false
-  }
+  if (match) return true; // Check if match is still true
+  else return false; // Return false
 }
 
 void wipe()
 { // If button still be pressed, wipe EEPROM
   Serial.println(F("Starting Wiping EEPROM"));
   for (int x = 0; x < EEPROM.length(); x = x + 1)
-  { //Loop end of EEPROM address
-    if (EEPROM.read(x) == 0)
-    { //If EEPROM address 0
-      // do nothing, already clear, go to the next address in order to save time and reduce writes to EEPROM
-    }
-    else EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS
-  }
+    if (EEPROM.read(x) != 0) EEPROM.write(x, 0); // if not write 0 to clear, it takes 3.3mS    }
   Serial.println(F("EEPROM Successfully Wiped"));
   //blink led red
 }
@@ -165,10 +152,7 @@ void wipe()
 void readID(int number)
 {
   int start = (number * 4) + 2; // Figure out starting position
-  for (int i = 0; i < 4; i++)
-  {                                         // Loop 4 times to get the 4 Bytes
-    storedCard[i] = EEPROM.read(start + i); // Assign values read from EEPROM to array
-  }
+  for (int i = 0; i < 4; i++) storedCard[i] = EEPROM.read(start + i); // Assign values read from EEPROM to array
 }
 
 boolean findID(byte find[])
@@ -182,9 +166,6 @@ boolean findID(byte find[])
       return true;
       break; // Stop looking we found it
     }
-    else
-    { // If not, return false
-    }
   }
   return false;
 }
@@ -197,16 +178,10 @@ void writeID(byte a[])
     int start = (num * 4) + 6; // Figure out where the next slot starts
     num++;                     // Increment the counter by one
     EEPROM.write(0, num);      // Write the new count to the counter
-    for (int j = 0; j < 4; j++)
-    {                                // Loop 4 times
-      EEPROM.write(start + j, a[j]); // Write the array values to EEPROM in the right position
-    }
+    for (int j = 0; j < 4; j++) EEPROM.write(start + j, a[j]); // Write the array values to EEPROM in the right position
     Serial.println(F("Succesfully added ID record to EEPROM"));
   }
-  else
-  {
-    Serial.println(F("Failed! There is something wrong with ID or bad EEPROM"));
-  }
+  else Serial.println(F("Failed! There is something wrong with ID or bad EEPROM"));
   EEPROM.commit();
 }
 
@@ -244,14 +219,10 @@ void deleteID(byte a[])
     looping = ((num - slot) * 4);
     num--;                // Decrement the counter by one
     EEPROM.write(0, num); // Write the new count to the counter
-    for (j = 0; j < looping; j++)
-    {                                                      // Loop the card shift times
+    for (j = 0; j < looping; j++) 
       EEPROM.write(start + j, EEPROM.read(start + 4 + j)); // Shift the array values to 4 places earlier in the EEPROM
-    }
-    for (int k = 0; k < 4; k++)
-    { // Shifting loop
-      EEPROM.write(start + j + k, 0);
-    }
+    for (int k = 0; k < 4; k++) 
+      EEPROM.write(start + j + k, 0);  // Shifting loop
     Serial.println(F("Succesfully removed ID record from EEPROM"));
   }
 }
@@ -330,14 +301,8 @@ void callback(char* topic, byte* message, unsigned int length) {
     {
       open(openTime);
       accessGranted = true;
-      
-    }else if (messageTemp == "false"){
-      deleteID(readCard);
     }
-    
-  }else if (messageTemp == "")
-  {
-    
+    else if (messageTemp == "false")deleteID(readCard); 
   }
 }
 
@@ -357,7 +322,7 @@ void setup() {
   pinMode(ENABLE, OUTPUT);
 
   strip.begin();
-  strip.setBrightness(100);
+  strip.setBrightness(80);
   strip.show();
 
   client.setServer(mqtt_server, 1883);
@@ -372,20 +337,36 @@ void setup() {
 
   delay(4000);
   WiFi.begin(SSID, PASS);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+  
+  int i = 0;
   while (WiFi.status() != WL_CONNECTED)
   {
-    delay(1000);
+    if(i > 10) {
+      Serial.println("Could not connect to WiFi");
+      break;
+    }
     Serial.println("Connecting to WiFi..");
+    delay(1000);
+    i++;
   }
   
   Serial.println("Connected to the WiFi network");
   AsyncElegantOTA.begin(&server, SSID, PASS);
   server.begin();
 
-  while (!client.connected())
+  i = 0;
+  while (!client.connected() && WiFi.status() == WL_CONNECTED)
   {
+    if(i > 10) {
+      Serial.println("Could not connect to mqtt");
+      break;
+    }
     client.connect("doorESP23", MQTT_USER, MQTT_PASS); 
     Serial.println("trying to connect to mqtt");
+    delay(1000);
+    i++;
   }
   Serial.println("mqtt is connected");
 
@@ -394,18 +375,13 @@ void setup() {
   //wipe EEPROM if button pressed
   if (digitalRead(wipeB) == LOW)
   { // when button pressed pin should get low, button connected to ground
-    // TODO: Add led Animation 
+    // TODO: Add led Animation
     Serial.println(F("Wipe Button Pressed"));
     Serial.println(F("You have 15 seconds to Cancel"));
     Serial.println(F("This will be remove all records and cannot be undone"));
     delay(5000); // Give user enough time to cancel operation
-    if (digitalRead(wipeB) == LOW)
-      wipe();
-    else
-    {
-      Serial.println(F("Wiping Cancelled"));
-      // TODO: Add led animation
-    }
+    if (digitalRead(wipeB) == LOW) wipe();
+    else Serial.println(F("Wiping Cancelled"));
   }
 
   setIdle();
@@ -416,7 +392,7 @@ void loop() {
   successRead = 0;
   do
   {
-    client.loop(); // mqtt
+    if (WiFi.status() == WL_CONNECTED && client.connected()) client.loop(); // mqtt
 
     if (readerDisabled) {
       if (millis() - timeLastCardRead > DELAY_BETWEEN_CARDS) {
